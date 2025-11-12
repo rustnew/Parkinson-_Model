@@ -198,6 +198,65 @@ impl NeuralNetwork {
         self.metrics.clone()
     }
 
+    /// ENTRAÎNEMENT AVEC POIDS DE CLASSE POUR DÉSÉQUILIBRE
+    pub fn train_with_class_weights(
+        &mut self, 
+        inputs: &[Array1<f64>], 
+        targets: &[Array1<f64>], 
+        epochs: usize,
+        batch_size: usize,
+    ) -> TrainingMetrics {
+        let mut optimizer = SGD::new(self.learning_rate);
+        
+        // Calculer les poids de classe
+        let (class_weight_positive, class_weight_negative) = self.calculate_class_weights(targets);
+        
+        println!("🎯 Entraînement avec poids de classe");
+        println!("   Poids: Parkinson={:.2}, Sain={:.2}", class_weight_positive, class_weight_negative);
+        println!("   Samples: {}, Batch: {}", inputs.len(), batch_size);
+        
+        for epoch in 0..epochs {
+            let mut epoch_loss = 0.0;
+            let mut batches_processed = 0;
+            
+            let mut indices: Vec<usize> = (0..inputs.len()).collect();
+            Self::shuffle_indices_fast(&mut indices);
+            
+            for batch_start in (0..inputs.len()).step_by(batch_size) {
+                let batch_end = (batch_start + batch_size).min(inputs.len());
+                let batch_loss = self.process_batch_weighted(
+                    inputs, 
+                    targets, 
+                    &indices[batch_start..batch_end],
+                    &mut optimizer,
+                    class_weight_positive,
+                    class_weight_negative
+                );
+                epoch_loss += batch_loss;
+                batches_processed += 1;
+            }
+            
+            if batches_processed > 0 {
+                let avg_loss = epoch_loss / batches_processed as f64;
+                
+                let improved = self.metrics.update(avg_loss, 0.0, optimizer.learning_rate);
+                
+                if epoch % 30 == 0 || epoch == epochs - 1 || improved {
+                    let marker = if improved { "📈" } else { "  " };
+                    println!("Epoch {:3} {} Loss: {:.6}", epoch, marker, avg_loss);
+                }
+                
+                if self.metrics.patience_counter > 80 {
+                    println!("⏹️  Arrêt à epoch {}", epoch);
+                    break;
+                }
+            }
+        }
+        
+        println!("✅ Entraînement pondéré terminé! Best loss: {:.6}", self.metrics.best_loss);
+        self.metrics.clone()
+    }
+
     /// Traitement de batch ultra rapide
     fn process_batch_ultra_fast(
         &mut self,
@@ -297,6 +356,63 @@ impl NeuralNetwork {
         total_loss / batch_size as f64
     }
 
+    /// Traitement de batch avec poids de classe
+    fn process_batch_weighted(
+        &mut self,
+        inputs: &[Array1<f64>],
+        targets: &[Array1<f64>],
+        batch_indices: &[usize],
+        optimizer: &mut SGD,
+        weight_positive: f64,
+        weight_negative: f64,
+    ) -> f64 {
+        let batch_size = batch_indices.len();
+        let mut total_loss = 0.0;
+        
+        let mut weight_gradients: Vec<Array2<f64>> = self.layers.iter()
+            .map(|layer| Array2::zeros((layer.output_size, layer.input_size)))
+            .collect();
+            
+        let mut bias_gradients: Vec<Array1<f64>> = self.layers.iter()
+            .map(|layer| Array1::zeros(layer.output_size))
+            .collect();
+
+        for &idx in batch_indices {
+            let input = &inputs[idx];
+            let target = &targets[idx];
+            
+            let (output, activations) = self.forward_with_cache(input);
+            
+            // Perte pondérée selon la classe
+            let class_weight = if target[0] > 0.5 { weight_positive } else { weight_negative };
+            let loss = self.mse_loss(&output, target) * class_weight;
+            total_loss += loss;
+            
+            let mut gradients = self.backward_fast(&output, target, &activations);
+            
+            // Appliquer le poids aux gradients
+            for (wg, bg) in &mut gradients {
+                *wg = wg.mapv(|x| x * class_weight);
+                *bg = bg.mapv(|x| x * class_weight);
+            }
+            
+            for (i, (wg, bg)) in gradients.iter().enumerate() {
+                weight_gradients[i] = &weight_gradients[i] + wg;
+                bias_gradients[i] = &bias_gradients[i] + bg;
+            }
+        }
+
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let avg_weight_grad = &weight_gradients[i] / batch_size as f64;
+            let avg_bias_grad = &bias_gradients[i] / batch_size as f64;
+            
+            layer.weights = optimizer.update_weights(&layer.weights, &avg_weight_grad);
+            layer.biases = optimizer.update_biases(&layer.biases, &avg_bias_grad);
+        }
+
+        total_loss / batch_size as f64
+    }
+
     /// Perte équilibrée pour gérer le déséquilibre des classes
     fn balanced_loss(&self, output: &Array1<f64>, target: &Array1<f64>) -> f64 {
         // MSE avec pondération pour équilibrer les classes
@@ -308,6 +424,34 @@ impl NeuralNetwork {
         } else {
             base_loss
         }
+    }
+
+    /// Calcule les poids de classe pour le déséquilibre
+    fn calculate_class_weights(&self, targets: &[Array1<f64>]) -> (f64, f64) {
+        let mut positive_count = 0;
+        let mut negative_count = 0;
+        
+        for target in targets {
+            if target[0] > 0.5 {
+                positive_count += 1;
+            } else {
+                negative_count += 1;
+            }
+        }
+        
+        let total = positive_count + negative_count;
+        let weight_positive = if positive_count > 0 { 
+            total as f64 / (2.0 * positive_count as f64) 
+        } else { 
+            1.0 
+        };
+        let weight_negative = if negative_count > 0 { 
+            total as f64 / (2.0 * negative_count as f64) 
+        } else { 
+            1.0 
+        };
+        
+        (weight_positive, weight_negative)
     }
 
     /// Rétropropagation optimisée

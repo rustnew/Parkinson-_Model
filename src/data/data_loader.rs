@@ -182,4 +182,33 @@ impl ParkinsonDataset {
         *inputs = new_inputs;
         *targets = new_targets;
     }
+    
+    pub fn analyze_class_distribution(&self) {
+        let mut parkinson_count = 0;
+        let mut sain_count = 0;
+        
+        for target in &self.classification_targets {
+            if target[0] > 0.5 {
+                parkinson_count += 1;
+            } else {
+                sain_count += 1;
+            }
+        }
+        
+        println!("🔍 ANALYSE DISTRIBUTION CLASSES:");
+        println!("   - Parkinson: {} samples", parkinson_count);
+        println!("   - Sain: {} samples", sain_count);
+        println!("   - Ratio: {:.1}% vs {:.1}%", 
+            (parkinson_count as f64 / (parkinson_count + sain_count) as f64) * 100.0,
+            (sain_count as f64 / (parkinson_count + sain_count) as f64) * 100.0
+        );
+        
+        if parkinson_count < 10 {
+            println!("🚨 ALERTE: Dataset très déséquilibré! Considérez:");
+            println!("   - Ajouter plus de données Parkinson");
+            println!("   - Utiliser l'augmentation de données");
+            println!("   - Techniques de ré-échantillonnage");
+        }
+    }
+
 }
